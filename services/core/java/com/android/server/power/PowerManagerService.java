@@ -553,6 +553,9 @@ public final class PowerManagerService extends SystemService
     // True if we are currently in light device idle mode.
     private boolean mLightDeviceIdleMode;
 
+    // overrule and disable brightness for buttons
+    private boolean mHardwareKeysDisable = false;
+
     // Set of app ids that we will always respect the wake locks for.
     int[] mDeviceIdleWhitelist = new int[0];
 
@@ -1141,7 +1144,11 @@ public final class PowerManagerService extends SystemService
         resolver.registerContentObserver(Settings.Global.getUriFor(
                 Settings.Global.DEVICE_DEMO_MODE),
                 false, mSettingsObserver, UserHandle.USER_SYSTEM);
-        IVrManager vrManager = IVrManager.Stub.asInterface(getBinderService(Context.VR_SERVICE));
+        resolver.registerContentObserver(Settings.Secure.getUriFor(
+                Settings.Secure.HARDWARE_KEYS_DISABLE),
+                false, mSettingsObserver, UserHandle.USER_ALL);
+
+       IVrManager vrManager = IVrManager.Stub.asInterface(getBinderService(Context.VR_SERVICE));
         if (vrManager != null) {
             try {
                 vrManager.registerListener(mVrStateCallbacks);
@@ -1266,6 +1273,9 @@ public final class PowerManagerService extends SystemService
         mScreenBrightnessModeSetting = Settings.System.getIntForUser(resolver,
                 Settings.System.SCREEN_BRIGHTNESS_MODE,
                 Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL, UserHandle.USER_CURRENT);
+        mHardwareKeysDisable = Settings.Secure.getIntForUser(resolver,
+                Settings.Secure.HARDWARE_KEYS_DISABLE, 0,
+                UserHandle.USER_CURRENT) != 0;
 
         mDirty |= DIRTY_SETTINGS;
     }
@@ -2292,6 +2302,18 @@ public final class PowerManagerService extends SystemService
                             + screenOffTimeout - screenDimDuration;
                     if (now < nextTimeout) {
                         mUserActivitySummary = USER_ACTIVITY_SCREEN_BRIGHT;
+                            if (getWakefulnessLocked() == WAKEFULNESS_AWAKE) {
+                            float buttonBrightness = PowerManager.BRIGHTNESS_OFF_FLOAT;
+                            if (mHardwareKeysDisable) {
+                                buttonBrightness = PowerManager.BRIGHTNESS_OFF_FLOAT;
+                            } else {
+                                if (isValidButtonBrightness(mButtonBrightnessOverrideFromWindowManager)) {
+                                    buttonBrightness = mButtonBrightnessOverrideFromWindowManager;
+                                } else if (isValidButtonBrightness(mButtonBrightness)) {
+                                    buttonBrightness = mButtonBrightness;
+                                }
+                            }
+
                     } else {
                         nextTimeout = mLastUserActivityTime + screenOffTimeout;
                         if (now < nextTimeout) {
