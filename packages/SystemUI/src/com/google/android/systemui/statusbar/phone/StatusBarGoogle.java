@@ -86,6 +86,7 @@ import com.android.systemui.statusbar.KeyguardIndicationController;
 import com.android.systemui.keyguard.DismissCallbackRegistry;
 import com.android.systemui.statusbar.NotificationShadeDepthController;
 import com.android.systemui.statusbar.phone.StatusBarTouchableRegionManager;
+import com.android.systemui.tuner.TunerService;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -182,10 +183,11 @@ public class StatusBarGoogle extends StatusBar {
             KeyguardIndicationController keyguardIndicationController,
             DismissCallbackRegistry dismissCallbackRegistry,
             Lazy<NotificationShadeDepthController> notificationShadeDepthControllerLazy,
-            StatusBarTouchableRegionManager statusBarTouchableRegionManager) {
+            StatusBarTouchableRegionManager statusBarTouchableRegionManager,
+            TunerService tunerService) {
+        super(context,
 
-        super(context, 
-            notificationsController,
+notificationsController,
             lightBarController,
             autoHideController,
             keyguardUpdateMonitor,
@@ -261,9 +263,9 @@ public class StatusBarGoogle extends StatusBar {
             keyguardIndicationController,
             dismissCallbackRegistry,
             notificationShadeDepthControllerLazy,
-            statusBarTouchableRegionManager);
-        }
-
+            statusBarTouchableRegionManager,
+                tunerService);
+}
     @Override
     public void start() {
         super.start();
