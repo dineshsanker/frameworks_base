@@ -5291,6 +5291,12 @@ public final class Settings {
         public static final String ANBI_ENABLED_OPTION = "anbi_enabled_option";
 
         /**
+         * Whether the Home button works during call
+         * @hide
+         */
+        public static final String ALLOW_INCALL_HOME = "allow_incall_home";
+
+        /**
          * Keys we no longer back up under the current schema, but want to continue to
          * process when restoring historical backup datasets.
          *
@@ -5441,6 +5447,7 @@ public final class Settings {
             PRIVATE_SETTINGS.add(USE_OLD_MOBILETYPE);
             PRIVATE_SETTINGS.add(CENTER_NOTIFICATION_HEADERS);
             PRIVATE_SETTINGS.add(ANBI_ENABLED_OPTION);
+            PRIVATE_SETTINGS.add(ALLOW_INCALL_HOME);
         }
 
         /**
