@@ -22,6 +22,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Resources;
 import android.database.ContentObserver;
+import android.graphics.drawable.Drawable;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Handler;
@@ -102,6 +103,9 @@ public class MobileSignalController extends SignalController<
     boolean mIsShowingIconGracefully = false;
     // Some specific carriers have 5GE network which is special LTE CA network.
     private static final int NETWORK_TYPE_LTE_CA_5GE = TelephonyManager.MAX_NETWORK_TYPE + 1;
+
+    // Volte Icon Style
+    private int mVoLTEstyle;
 
     private ImsManager mImsManager;
     private ImsManager.Connector mImsManagerConnector;
@@ -198,6 +202,33 @@ public class MobileSignalController extends SignalController<
                     + " into " + mImsManager);
         } catch (ImsException e) {
             Log.d(mTag, "unable to addRegistrationCallback callback.");
+
+
+
+        void observe() {
+            ContentResolver resolver = mContext.getContentResolver();
+           resolver.registerContentObserver(Settings.System.getUriFor(
+                  Settings.System.VOLTE_ICON_STYLE),
+                  false, this, UserHandle.USER_ALL);
+        }
+
+        /*
+         *  @hide
+         */
+        @Override
+        public void onChange(boolean selfChange) {
+            updateSettings();
+            if (uri.equals(Settings.System.getUriFor(
+                    Settings.System.VOLTE_ICON_STYLE))) {
+                    mVoLTEstyle = Settings.System.getIntForUser(
+                            mContext.getContentResolver(),
+                            Settings.System.VOLTE_ICON_STYLE,
+                            0, UserHandle.USER_CURRENT);
+            }
+            mapIconSets();
+            updateTelephony();
+            notifyListeners();
+            updateSettings();
         }
         queryImsState();
     }
@@ -409,6 +440,30 @@ public class MobileSignalController extends SignalController<
 
     private int getVolteResId() {
         int resId = 0;
+        if ( (mCurrentState.voiceCapable || mCurrentState.videoCapable)
+                &&  mCurrentState.imsRegistered && mVoLTEicon) {
+            switch(mVoLTEstyle) {
+                //Vo
+                case 0:
+                default:
+                    resId = R.drawable.ic_volte;
+                    break;
+                // VoLTE
+                case 1:
+                    resId = R.drawable.ic_volte1;
+                    break;
+                // OOS VoLTE
+                case 2:
+                    resId = R.drawable.ic_volte2;
+                    break;
+                // HD Icon
+                case 3:
+                    resId = R.drawable.ic_hd_volte;
+                    break;
+            }
+        }
+        return resId;
+    }
 
         if ( mCurrentState.imsRegistered ) {
             resId = R.drawable.ic_volte;
