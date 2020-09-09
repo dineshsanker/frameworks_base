@@ -88,6 +88,7 @@ import com.android.systemui.ExpandHelper;
 import com.android.systemui.Interpolators;
 import com.android.systemui.R;
 import com.android.systemui.SwipeHelper;
+import com.android.systemui.classifier.FalsingManagerFactory;
 import com.android.systemui.colorextraction.SysuiColorExtractor;
 import com.android.systemui.plugins.ActivityStarter;
 import com.android.systemui.plugins.FalsingManager;
@@ -97,6 +98,7 @@ import com.android.systemui.plugins.statusbar.NotificationMenuRowPlugin.OnMenuEv
 import com.android.systemui.plugins.statusbar.NotificationSwipeActionHelper;
 import com.android.systemui.plugins.statusbar.StatusBarStateController;
 import com.android.systemui.plugins.statusbar.StatusBarStateController.StateListener;
+import com.android.systemui.statusbar.AmbientPulseManager;
 import com.android.systemui.statusbar.CommandQueue;
 import com.android.systemui.statusbar.DragDownHelper.DragDownCallback;
 import com.android.systemui.statusbar.EmptyShadeView;
@@ -125,10 +127,10 @@ import com.android.systemui.statusbar.notification.row.NotificationGuts;
 import com.android.systemui.statusbar.notification.row.NotificationGutsManager;
 import com.android.systemui.statusbar.notification.row.NotificationSnooze;
 import com.android.systemui.statusbar.notification.row.StackScrollerDecorView;
+import com.android.systemui.statusbar.phone.DozeParameters;
 import com.android.systemui.statusbar.phone.HeadsUpAppearanceController;
 import com.android.systemui.statusbar.phone.HeadsUpManagerPhone;
 import com.android.systemui.statusbar.phone.HeadsUpTouchHelper;
-import com.android.systemui.statusbar.phone.KeyguardBypassController;
 import com.android.systemui.statusbar.phone.LockscreenGestureLogger;
 import com.android.systemui.statusbar.phone.NotificationGroupManager;
 import com.android.systemui.statusbar.phone.NotificationGroupManager.OnGroupChangeListener;
@@ -181,9 +183,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
      * gap is drawn between them). In this case we don't want to round their corners.
      */
     private static final int DISTANCE_BETWEEN_ADJACENT_SECTIONS_PX = 1;
-    private final KeyguardBypassController mKeyguardBypassController;
-    private final DynamicPrivacyController mDynamicPrivacyController;
-    private final SysuiStatusBarStateController mStatusbarStateController;
+    private final AmbientPulseManager mAmbientPulseManager;
 
     private ExpandHelper mExpandHelper;
     private final NotificationSwipeHelper mSwipeHelper;
@@ -270,6 +270,8 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     private boolean mTopPaddingNeedsAnimation;
     private boolean mDimmedNeedsAnimation;
     private boolean mHideSensitiveNeedsAnimation;
+    private boolean mDarkNeedsAnimation;
+    private int mDarkAnimationOriginIndex;
     private boolean mActivateNeedsAnimation;
     private boolean mGoToFullShadeNeedsAnimation;
     private boolean mIsExpanded = true;
@@ -412,13 +414,12 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     private final ViewOutlineProvider mOutlineProvider = new ViewOutlineProvider() {
         @Override
         public void getOutline(View view, Outline outline) {
-            if (mAmbientState.isHiddenAtAll()) {
-                float xProgress = mHideXInterpolator.getInterpolation(
-                        (1 - mLinearHideAmount) * mBackgroundXFactor);
+            if (mAmbientState.isDarkAtAll()) {
+                float xProgress = mDarkXInterpolator.getInterpolation(
+                        (1 - mLinearDarkAmount) * mBackgroundXFactor);
                 outline.setRoundRect(mBackgroundAnimationRect,
                         MathUtils.lerp(mCornerRadius / 2.0f, mCornerRadius,
                                 xProgress));
-                outline.setAlpha(1.0f - mAmbientState.getHideAmount());
             } else {
                 ViewOutlineProvider.BACKGROUND.getOutline(view, outline);
             }
@@ -431,14 +432,14 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     private View mForcedScroll;
 
     /**
-     * @see #setHideAmount(float, float)
+     * @see #setDarkAmount(float, float)
      */
-    private float mInterpolatedHideAmount = 0f;
+    private float mInterpolatedDarkAmount = 0f;
 
     /**
-     * @see #setHideAmount(float, float)
+     * @see #setDarkAmount(float, float)
      */
-    private float mLinearHideAmount = 0f;
+    private float mLinearDarkAmount = 0f;
 
     /**
      * How fast the background scales in the X direction as a factor of the Y expansion.
@@ -473,10 +474,12 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     private int mCornerRadius;
     private int mSidePaddings;
     private final Rect mBackgroundAnimationRect = new Rect();
+    private int mAntiBurnInOffsetX;
     private ArrayList<BiConsumer<Float, Float>> mExpandedHeightListeners = new ArrayList<>();
     private int mHeadsUpInset;
     private HeadsUpAppearanceController mHeadsUpAppearanceController;
     private NotificationIconAreaController mIconAreaController;
+    private float mHorizontalPanelTranslation;
     private final NotificationLockscreenUserManager mLockscreenUserManager =
             Dependency.get(NotificationLockscreenUserManager.class);
     private final Rect mTmpRect = new Rect();
@@ -497,17 +500,17 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
             Dependency.get(VisualStabilityManager.class);
     protected boolean mClearAllEnabled;
 
-    private Interpolator mHideXInterpolator = Interpolators.FAST_OUT_SLOW_IN;
+    private Interpolator mDarkXInterpolator = Interpolators.FAST_OUT_SLOW_IN;
     private NotificationPanelView mNotificationPanel;
     private final ShadeController mShadeController = Dependency.get(ShadeController.class);
 
     private final NotificationGutsManager
             mNotificationGutsManager = Dependency.get(NotificationGutsManager.class);
     private final NotificationSectionsManager mSectionsManager;
+    /**
+     * If the {@link NotificationShelf} should be visible when dark.
+     */
     private boolean mAnimateBottomOnLayout;
-    private float mLastSentAppear;
-    private float mLastSentExpandedHeight;
-    private boolean mWillExpand;
     private boolean needsColorRefresh = true;
     private boolean mShowHeaders;
 
@@ -517,13 +520,11 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
             AttributeSet attrs,
             @Named(ALLOW_NOTIFICATION_LONG_PRESS_NAME) boolean allowLongPress,
             NotificationRoundnessManager notificationRoundnessManager,
+            AmbientPulseManager ambientPulseManager,
             DynamicPrivacyController dynamicPrivacyController,
             ConfigurationController configurationController,
             ActivityStarter activityStarter,
-            StatusBarStateController statusBarStateController,
-            HeadsUpManagerPhone headsUpManager,
-            KeyguardBypassController keyguardBypassController,
-            FalsingManager falsingManager) {
+            StatusBarStateController statusBarStateController) {
         super(context, attrs, 0, 0);
         Resources res = getResources();
 
@@ -532,13 +533,8 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         for (int i = 0; i < NUM_SECTIONS; i++) {
             mSections[i] = new NotificationSection(this);
         }
-        mRoundnessManager = notificationRoundnessManager;
 
-        mHeadsUpManager = headsUpManager;
-        mHeadsUpManager.addListener(mRoundnessManager);
-        mHeadsUpManager.setAnimationStateHandler(this::setHeadsUpGoingAwayAnimationsAllowed);
-        mKeyguardBypassController = keyguardBypassController;
-        mFalsingManager = falsingManager;
+        mAmbientPulseManager = ambientPulseManager;
 
         mShowHeaders = Settings.System.getIntForUser(getContext().getContentResolver(),
                 Settings.System.NOTIFICATION_HEADERS, 1, UserHandle.USER_CURRENT) == 1;
@@ -553,7 +549,8 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
                         mShowHeaders);
         mSectionsManager.initialize(LayoutInflater.from(context));
 
-        mAmbientState = new AmbientState(context, mSectionsManager, mHeadsUpManager);
+        mAmbientState = new AmbientState(context, mSectionsManager);
+        mRoundnessManager = notificationRoundnessManager;
         mBgColor = context.getColor(R.color.notification_shade_background_color);
         int minHeight = res.getDimensionPixelSize(R.dimen.notification_min_height);
         int maxHeight = res.getDimensionPixelSize(R.dimen.notification_max_height);
@@ -562,16 +559,17 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         mExpandHelper.setEventSource(this);
         mExpandHelper.setScrollAdapter(this);
         mSwipeHelper = new NotificationSwipeHelper(SwipeHelper.X, mNotificationCallback,
-                getContext(), mMenuEventListener, mFalsingManager);
+                getContext(), mMenuEventListener);
         mStackScrollAlgorithm = createStackScrollAlgorithm(context);
         initView(context);
+        mFalsingManager = FalsingManagerFactory.getInstance(context);
         mShouldDrawNotificationBackground =
                 res.getBoolean(R.bool.config_drawNotificationBackground);
         mFadeNotificationsOnDismiss =
                 res.getBoolean(R.bool.config_fadeNotificationsOnDismiss);
         mRoundnessManager.setAnimatedChildren(mChildrenToAddAnimated);
         mRoundnessManager.setOnRoundingChangedCallback(this::invalidate);
-        addOnExpandedHeightChangedListener(mRoundnessManager::setExpanded);
+        addOnExpandedHeightListener(mRoundnessManager::setExpanded);
         mLockscreenUserManager.addUserChangedListener(userId ->
                 updateSensitiveness(false /* animated */));
         setOutlineProvider(mOutlineProvider);
@@ -579,12 +577,11 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         // Blocking helper manager wants to know the expanded state, update as well.
         NotificationBlockingHelperManager blockingHelperManager =
                 Dependency.get(NotificationBlockingHelperManager.class);
-        addOnExpandedHeightChangedListener((height, unused) -> {
+        addOnExpandedHeightListener((height, unused) -> {
             blockingHelperManager.setNotificationShadeExpanded(height);
         });
 
-        boolean willDraw = mShouldDrawNotificationBackground || DEBUG;
-        setWillNotDraw(!willDraw);
+        updateWillNotDraw();
         mBackgroundPaint.setAntiAlias(true);
         if (DEBUG) {
             mDebugPaint = new Paint();
@@ -615,8 +612,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
             }
         });
         dynamicPrivacyController.addListener(this);
-        mDynamicPrivacyController = dynamicPrivacyController;
-        mStatusbarStateController = (SysuiStatusBarStateController) statusBarStateController;
     }
 
     private void updateDismissRtlSetting(boolean dismissRtl) {
@@ -645,14 +640,10 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     /**
      * @return the height at which we will wake up when pulsing
      */
-    public float getWakeUpHeight() {
+    public float getPulseHeight() {
         ActivatableNotificationView firstChild = getFirstChildWithBackground();
         if (firstChild != null) {
-            if (mKeyguardBypassController.getBypassEnabled()) {
-                return firstChild.getHeadsUpHeightWithoutHeader();
-            } else {
-                return firstChild.getCollapsedHeight();
-            }
+            return firstChild.getCollapsedHeight();
         }
         return 0f;
     }
@@ -728,9 +719,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
      */
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
     public boolean hasActiveClearableNotifications(@SelectedRows int selection) {
-        if (mDynamicPrivacyController.isInLockedDownShade()) {
-            return false;
-        }
         int childCount = getChildCount();
         for (int i = 0; i < childCount; i++) {
             View child = getChildAt(i);
@@ -806,7 +794,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         if (mShouldDrawNotificationBackground
                 && (mSections[0].getCurrentBounds().top
                 < mSections[NUM_SECTIONS - 1].getCurrentBounds().bottom
-                || mAmbientState.isDozing())) {
+                || mAmbientState.isDark())) {
             drawBackground(canvas);
         } else if (mInHeadsUpPinnedMode || mHeadsUpAnimatingAway) {
             drawHeadsUpBackground(canvas);
@@ -840,7 +828,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
                 canvas.drawLine(0, y, getWidth(), y, mDebugPaint);
             }
             canvas.drawText(Integer.toString(getMaxNegativeScrollAmount()), getWidth() - 100,
-                    getTopPadding() + 30, mDebugPaint);
+                    getIntrinsicPadding() + 30, mDebugPaint);
             canvas.drawText(Integer.toString(getMaxPositiveScrollAmount()), getWidth() - 100,
                     getHeight() - 30, mDebugPaint);
         }
@@ -852,17 +840,17 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         int lockScreenRight = getWidth() - mSidePaddings;
         int lockScreenTop = mSections[0].getCurrentBounds().top;
         int lockScreenBottom = mSections[NUM_SECTIONS - 1].getCurrentBounds().bottom;
-        int hiddenLeft = getWidth() / 2;
-        int hiddenTop = mTopPadding;
+        int darkLeft = getWidth() / 2;
+        int darkTop = mTopPadding;
 
-        float yProgress = 1 - mInterpolatedHideAmount;
-        float xProgress = mHideXInterpolator.getInterpolation(
-                (1 - mLinearHideAmount) * mBackgroundXFactor);
+        float yProgress = 1 - mInterpolatedDarkAmount;
+        float xProgress = mDarkXInterpolator.getInterpolation(
+                (1 - mLinearDarkAmount) * mBackgroundXFactor);
 
-        int left = (int) MathUtils.lerp(hiddenLeft, lockScreenLeft, xProgress);
-        int right = (int) MathUtils.lerp(hiddenLeft, lockScreenRight, xProgress);
-        int top = (int) MathUtils.lerp(hiddenTop, lockScreenTop, yProgress);
-        int bottom = (int) MathUtils.lerp(hiddenTop, lockScreenBottom, yProgress);
+        int left = (int) MathUtils.lerp(darkLeft, lockScreenLeft, xProgress);
+        int right = (int) MathUtils.lerp(darkLeft, lockScreenRight, xProgress);
+        int top = (int) MathUtils.lerp(darkTop, lockScreenTop, yProgress);
+        int bottom = (int) MathUtils.lerp(darkTop, lockScreenBottom, yProgress);
         mBackgroundAnimationRect.set(
                 left,
                 top,
@@ -878,13 +866,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
                 break;
             }
         }
-        boolean shouldDrawBackground;
-        if (mKeyguardBypassController.getBypassEnabled() && onKeyguard()) {
-            shouldDrawBackground = isPulseExpanding();
-        } else {
-            shouldDrawBackground = !mAmbientState.isDozing() || anySectionHasVisibleChild;
-        }
-        if (shouldDrawBackground) {
+        if (!mAmbientState.isDark() || anySectionHasVisibleChild) {
             drawBackgroundRects(canvas, left, right, top, backgroundTopAnimationOffset);
         }
 
@@ -984,7 +966,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         // Interpolate between semi-transparent notification panel background color
         // and white AOD separator.
         float colorInterpolation = MathUtils.smoothStep(0.4f /* start */, 1f /* end */,
-                mLinearHideAmount);
+                mLinearDarkAmount);
         int color = ColorUtils.blendARGB(mBgColor, Color.WHITE, colorInterpolation);
 
         if (mCachedBackgroundColor != color) {
@@ -1038,10 +1020,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         }
     }
 
-    public boolean isPulseExpanding() {
-        return mAmbientState.isPulseExpanding();
-    }
-
     @Override
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
@@ -1084,7 +1062,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         requestChildrenUpdate();
         updateFirstAndLastBackgroundViews();
         updateAlgorithmLayoutMinHeight();
-        updateOwnTranslationZ();
     }
 
     @ShadeViewRefactor(RefactorComponent.STATE_RESOLVER)
@@ -1358,7 +1335,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
                 stackHeight = (int) height;
             }
         } else {
-            appearFraction = calculateAppearFraction(height);
+            appearFraction = getAppearFraction(height);
             if (appearFraction >= 0) {
                 translationY = NotificationUtils.interpolate(getExpandTranslationStart(), 0,
                         appearFraction);
@@ -1381,26 +1358,9 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
             requestChildrenUpdate();
         }
         setStackTranslation(translationY);
-        notifyAppearChangedListeners();
-    }
-
-    private void notifyAppearChangedListeners() {
-        float appear;
-        float expandAmount;
-        if (mKeyguardBypassController.getBypassEnabled() && onKeyguard()) {
-            appear = calculateAppearFractionBypass();
-            expandAmount = getPulseHeight();
-        } else {
-            appear = MathUtils.saturate(calculateAppearFraction(mExpandedHeight));
-            expandAmount = mExpandedHeight;
-        }
-        if (appear != mLastSentAppear || expandAmount != mLastSentExpandedHeight) {
-            mLastSentAppear = appear;
-            mLastSentExpandedHeight = expandAmount;
-            for (int i = 0; i < mExpandedHeightListeners.size(); i++) {
-                BiConsumer<Float, Float> listener = mExpandedHeightListeners.get(i);
-                listener.accept(expandAmount, appear);
-            }
+        for (int i = 0; i < mExpandedHeightListeners.size(); i++) {
+            BiConsumer<Float, Float> listener = mExpandedHeightListeners.get(i);
+            listener.accept(mExpandedHeight, appearFraction);
         }
     }
 
@@ -1427,12 +1387,11 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
             mIsClipped = clipped;
         }
 
-        if (mAmbientState.isHiddenAtAll()) {
+        if (!mPulsing && mAmbientState.isFullyDark()) {
+            setClipBounds(null);
+        } else if (mAmbientState.isDarkAtAll()) {
             clipToOutline = true;
             invalidateOutline();
-            if (isFullyHidden()) {
-                setClipBounds(null);
-            }
         } else if (clipped) {
             setClipBounds(mRequestedClipBounds);
         } else {
@@ -1496,7 +1455,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         int notGoneChildCount = getNotGoneChildCount();
         if (mEmptyShadeView.getVisibility() == GONE && notGoneChildCount != 0) {
             if (isHeadsUpTransition()
-                    || (mHeadsUpManager.hasPinnedHeadsUp() && !mAmbientState.isDozing())) {
+                    || (mHeadsUpManager.hasPinnedHeadsUp() && !mAmbientState.isDark())) {
                 appearPosition = getTopHeadsUpPinnedHeight();
             } else {
                 appearPosition = 0;
@@ -1522,7 +1481,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
      * @return the fraction of the appear animation that has been performed
      */
     @ShadeViewRefactor(RefactorComponent.COORDINATOR)
-    public float calculateAppearFraction(float height) {
+    public float getAppearFraction(float height) {
         float appearEndPosition = getAppearEndPosition();
         float appearStartPosition = getAppearStartPosition();
         return (height - appearStartPosition)
@@ -2461,9 +2420,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         }
         mIntrinsicContentHeight = height;
 
-        // The topPadding can be bigger than the regular padding when qs is expanded, in that
-        // state the maxPanelHeight and the contentHeight should be bigger
-        mContentHeight = height + Math.max(mIntrinsicPadding, mTopPadding) + mBottomMargin;
+        mContentHeight = height + mTopPadding + mBottomMargin;
         updateScrollability();
         clampScrollPosition();
         mAmbientState.setLayoutMaxHeight(mContentHeight);
@@ -2501,7 +2458,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
     private void updateBackground() {
         // No need to update the background color if it's not being drawn.
-        if (!mShouldDrawNotificationBackground) {
+        if (!mShouldDrawNotificationBackground || mAmbientState.isFullyDark()) {
             return;
         }
 
@@ -2593,8 +2550,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         }
         int minTopPosition;
         NotificationSection lastSection = getLastVisibleSection();
-        boolean onKeyguard = mStatusBarState == StatusBarState.KEYGUARD;
-        if (!onKeyguard) {
+        if (mStatusBarState != StatusBarState.KEYGUARD) {
             minTopPosition = (int) (mTopPadding + mStackTranslation);
         } else if (lastSection == null) {
             minTopPosition = mTopPadding;
@@ -2607,9 +2563,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
                     false /* shiftPulsingWithFirst */);
             minTopPosition = firstVisibleSection.getBounds().top;
         }
-        boolean shiftPulsingWithFirst = mHeadsUpManager.getAllEntries().count() <= 1
-                && (mAmbientState.isDozing()
-                        || (mKeyguardBypassController.getBypassEnabled() && onKeyguard));
+        boolean shiftPulsingWithFirst = mAmbientPulseManager.getAllEntries().count() <= 1;
         for (NotificationSection section : mSections) {
             int minBottomPosition = minTopPosition;
             if (section == lastSection) {
@@ -2854,9 +2808,12 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
      *
      * @param qsHeight               the top padding imposed by the quick settings panel
      * @param animate                whether to animate the change
+     * @param ignoreIntrinsicPadding if true, {@link #getIntrinsicPadding()} is ignored and
+     *                               {@code qsHeight} is the final top padding
      */
     @ShadeViewRefactor(RefactorComponent.COORDINATOR)
-    public void updateTopPadding(float qsHeight, boolean animate) {
+    public void updateTopPadding(float qsHeight, boolean animate,
+            boolean ignoreIntrinsicPadding) {
         int topPadding = (int) qsHeight;
         int minStackHeight = getLayoutMinHeight();
         if (topPadding + minStackHeight > getHeight()) {
@@ -2864,7 +2821,8 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         } else {
             mTopPaddingOverflow = 0;
         }
-        setTopPadding(topPadding, animate && !mKeyguardBypassController.getBypassEnabled());
+        setTopPadding(ignoreIntrinsicPadding ? topPadding : clampPadding(topPadding),
+                animate);
         setExpandedHeight(mExpandedHeight);
     }
 
@@ -3300,6 +3258,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     private void updateNotificationAnimationStates() {
         boolean running = mAnimationsEnabled || hasPulsingNotifications();
         mShelf.setAnimationsEnabled(running);
+        mIconAreaController.setAnimationsEnabled(running);
         int childCount = getChildCount();
         for (int i = 0; i < childCount; i++) {
             View child = getChildAt(i);
@@ -3359,7 +3318,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     @Override
     @ShadeViewRefactor(RefactorComponent.STATE_RESOLVER)
     public void generateAddAnimation(ExpandableView child, boolean fromMoreCard) {
-        if (mIsExpanded && mAnimationsEnabled && !mChangePositionInProgress && !isFullyHidden()) {
+        if (mIsExpanded && mAnimationsEnabled && !mChangePositionInProgress) {
             // Generate Animations
             mChildrenToAddAnimated.add(child);
             if (fromMoreCard) {
@@ -3367,8 +3326,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
             }
             mNeedsAnimation = true;
         }
-        if (isHeadsUp(child) && mAnimationsEnabled && !mChangePositionInProgress
-                && !isFullyHidden()) {
+        if (isHeadsUp(child) && mAnimationsEnabled && !mChangePositionInProgress) {
             mAddedHeadsUpChildren.add(child);
             mChildrenToAddAnimated.remove(child);
         }
@@ -3441,6 +3399,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         generateActivateEvent();
         generateDimmedEvent();
         generateHideSensitiveEvent();
+        generateDarkEvent();
         generateGoToFullShadeEvent();
         generateViewResizeEvent();
         generateGroupExpansionEvent();
@@ -3452,20 +3411,10 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         for (Pair<ExpandableNotificationRow, Boolean> eventPair : mHeadsUpChangeAnimations) {
             ExpandableNotificationRow row = eventPair.first;
             boolean isHeadsUp = eventPair.second;
-            if (isHeadsUp != row.isHeadsUp()) {
-                // For cases where we have a heads up showing and appearing again we shouldn't
-                // do the animations at all.
-                continue;
-            }
             int type = AnimationEvent.ANIMATION_TYPE_HEADS_UP_OTHER;
             boolean onBottom = false;
             boolean pinnedAndClosed = row.isPinned() && !mIsExpanded;
-            boolean performDisappearAnimation = !mIsExpanded
-                    // Only animate if we still have pinned heads up, otherwise we just have the
-                    // regular collapse animation of the lock screen
-                    || (mKeyguardBypassController.getBypassEnabled() && onKeyguard()
-                            && mHeadsUpManager.hasPinnedHeadsUp());
-            if (performDisappearAnimation && !isHeadsUp) {
+            if (!mIsExpanded && !isHeadsUp) {
                 type = row.wasJustClicked()
                         ? AnimationEvent.ANIMATION_TYPE_HEADS_UP_DISAPPEAR_CLICK
                         : AnimationEvent.ANIMATION_TYPE_HEADS_UP_DISAPPEAR;
@@ -3615,7 +3564,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     private void generateTopPaddingEvent() {
         if (mTopPaddingNeedsAnimation) {
             AnimationEvent event;
-            if (mAmbientState.isDozing()) {
+            if (mAmbientState.isDark()) {
                 event = new AnimationEvent(null /* view */,
                         AnimationEvent.ANIMATION_TYPE_TOP_PADDING_CHANGED,
                         KeyguardSliceView.DEFAULT_ANIM_DURATION);
@@ -3662,6 +3611,20 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
                     new AnimationEvent(null, AnimationEvent.ANIMATION_TYPE_HIDE_SENSITIVE));
         }
         mHideSensitiveNeedsAnimation = false;
+    }
+
+    @ShadeViewRefactor(RefactorComponent.STATE_RESOLVER)
+    private void generateDarkEvent() {
+        if (mDarkNeedsAnimation) {
+            AnimationEvent ev = new AnimationEvent(null,
+                    AnimationEvent.ANIMATION_TYPE_DARK,
+                    new AnimationFilter()
+                            .animateDark()
+                            .animateY(mShelf));
+            ev.darkAnimationOriginIndex = mDarkAnimationOriginIndex;
+            mAnimationEvents.add(ev);
+        }
+        mDarkNeedsAnimation = false;
     }
 
     @ShadeViewRefactor(RefactorComponent.STATE_RESOLVER)
@@ -3803,16 +3766,9 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         initVelocityTrackerIfNotExists();
         mVelocityTracker.addMovement(ev);
 
-        final int action = ev.getActionMasked();
-        if (ev.findPointerIndex(mActivePointerId) == -1 && action != MotionEvent.ACTION_DOWN) {
-            // Incomplete gesture, possibly due to window swap mid-gesture. Ignore until a new
-            // one starts.
-            Log.e(TAG, "Invalid pointerId=" + mActivePointerId + " in onTouchEvent "
-                    + MotionEvent.actionToString(ev.getActionMasked()));
-            return true;
-        }
+        final int action = ev.getAction();
 
-        switch (action) {
+        switch (action & MotionEvent.ACTION_MASK) {
             case MotionEvent.ACTION_DOWN: {
                 if (getChildCount() == 0 || !isInContentBounds(ev)) {
                     return false;
@@ -4456,7 +4412,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         mStateAnimator.setShadeExpanded(isExpanded);
         mSwipeHelper.setIsExpanded(isExpanded);
         if (changed) {
-            mWillExpand = false;
             if (!mIsExpanded) {
                 mGroupManager.collapseAllGroups();
                 mExpandHelper.cancelImmediately();
@@ -4776,6 +4731,14 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         return mIntrinsicPadding;
     }
 
+    /**
+     * @return the y position of the first notification
+     */
+    @ShadeViewRefactor(RefactorComponent.COORDINATOR)
+    public float getNotificationsTopY() {
+        return mTopPadding + getStackTranslation();
+    }
+
     @Override
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
     public boolean shouldDelayChildPressedState() {
@@ -4783,79 +4746,123 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     }
 
     /**
-     * See {@link AmbientState#setDozing}.
+     * See {@link AmbientState#setDark}.
      */
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
-    public void setDozing(boolean dozing, boolean animate,
-            @Nullable PointF touchWakeUpScreenLocation) {
-        if (mAmbientState.isDozing() == dozing) {
+    public void setDark(boolean dark, boolean animate, @Nullable PointF touchWakeUpScreenLocation) {
+        if (mAmbientState.isDark() == dark) {
             return;
         }
-        mAmbientState.setDozing(dozing);
+        mAmbientState.setDark(dark);
+        if (animate && mAnimationsEnabled) {
+            mDarkNeedsAnimation = true;
+            mDarkAnimationOriginIndex = findDarkAnimationOriginIndex(touchWakeUpScreenLocation);
+            mNeedsAnimation = true;
+        } else {
+            setDarkAmount(dark ? 1f : 0f);
+            updateBackground();
+        }
         requestChildrenUpdate();
+        updateWillNotDraw();
         notifyHeightChangeListener(mShelf);
     }
 
+    @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
+    private void updatePanelTranslation() {
+        setTranslationX(mHorizontalPanelTranslation + mAntiBurnInOffsetX * mInterpolatedDarkAmount);
+    }
+
+    @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
+    public void setHorizontalPanelTranslation(float verticalPanelTranslation) {
+        mHorizontalPanelTranslation = verticalPanelTranslation;
+        updatePanelTranslation();
+    }
+
     /**
-     * Sets the current hide amount.
+     * Updates whether or not this Layout will perform its own custom drawing (i.e. whether or
+     * not {@link #onDraw(Canvas)} is called). This method should be called whenever the
+     * {@link #mAmbientState}'s dark mode is toggled.
+     */
+    @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
+    private void updateWillNotDraw() {
+        boolean willDraw = mShouldDrawNotificationBackground || DEBUG;
+        setWillNotDraw(!willDraw);
+    }
+
+    @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
+    private void setDarkAmount(float darkAmount) {
+        setDarkAmount(darkAmount, darkAmount);
+    }
+
+    /**
+     * Sets the current dark amount.
      *
-     * @param linearHideAmount       The hide amount that follows linear interpoloation in the
+     * @param linearDarkAmount       The dark amount that follows linear interpoloation in the
      *                               animation,
      *                               i.e. animates from 0 to 1 or vice-versa in a linear manner.
-     * @param interpolatedHideAmount The hide amount that follows the actual interpolation of the
+     * @param interpolatedDarkAmount The dark amount that follows the actual interpolation of the
      *                               animation curve.
      */
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
-    public void setHideAmount(float linearHideAmount, float interpolatedHideAmount) {
-        mLinearHideAmount = linearHideAmount;
-        mInterpolatedHideAmount = interpolatedHideAmount;
-        boolean wasFullyHidden = mAmbientState.isFullyHidden();
-        boolean wasHiddenAtAll = mAmbientState.isHiddenAtAll();
-        mAmbientState.setHideAmount(interpolatedHideAmount);
-        boolean nowFullyHidden = mAmbientState.isFullyHidden();
-        boolean nowHiddenAtAll = mAmbientState.isHiddenAtAll();
-        if (nowFullyHidden != wasFullyHidden) {
-            updateVisibility();
+    public void setDarkAmount(float linearDarkAmount, float interpolatedDarkAmount) {
+        mLinearDarkAmount = linearDarkAmount;
+        mInterpolatedDarkAmount = interpolatedDarkAmount;
+        boolean wasFullyDark = mAmbientState.isFullyDark();
+        boolean wasDarkAtAll = mAmbientState.isDarkAtAll();
+        mAmbientState.setDarkAmount(interpolatedDarkAmount);
+        boolean nowFullyDark = mAmbientState.isFullyDark();
+        boolean nowDarkAtAll = mAmbientState.isDarkAtAll();
+        if (nowFullyDark != wasFullyDark) {
+            updateContentHeight();
+            if (nowFullyDark) {
+                updateDarkShelfVisibility();
+            }
         }
-        if (!wasHiddenAtAll && nowHiddenAtAll) {
+        if (!wasDarkAtAll && nowDarkAtAll) {
             resetExposedMenuView(true /* animate */, true /* animate */);
         }
-        if (nowFullyHidden != wasFullyHidden || wasHiddenAtAll != nowHiddenAtAll) {
+        if (nowFullyDark != wasFullyDark || wasDarkAtAll != nowDarkAtAll) {
             invalidateOutline();
         }
         updateAlgorithmHeightAndPadding();
         updateBackgroundDimming();
+        updatePanelTranslation();
         requestChildrenUpdate();
-        updateOwnTranslationZ();
     }
 
-    private void updateOwnTranslationZ() {
-        // Since we are clipping to the outline we need to make sure that the shadows aren't
-        // clipped when pulsing
-        float ownTranslationZ = 0;
-        if (mKeyguardBypassController.getBypassEnabled() && mAmbientState.isHiddenAtAll()) {
-            ExpandableView firstChildNotGone = getFirstChildNotGone();
-            if (firstChildNotGone != null && firstChildNotGone.showingPulsing()) {
-                ownTranslationZ = firstChildNotGone.getTranslationZ();
-            }
+    private void updateDarkShelfVisibility() {
+        DozeParameters dozeParameters = DozeParameters.getInstance(mContext);
+        if (dozeParameters.shouldControlScreenOff()) {
+            mShelf.fadeInTranslating();
         }
-        setTranslationZ(ownTranslationZ);
-    }
-
-    private void updateVisibility() {
-        boolean shouldShow = !mAmbientState.isFullyHidden() || !onKeyguard();
-        setVisibility(shouldShow ? View.VISIBLE : View.INVISIBLE);
+        updateClipping();
     }
 
     @ShadeViewRefactor(RefactorComponent.STATE_RESOLVER)
-    public void notifyHideAnimationStart(boolean hide) {
-        // We only swap the scaling factor if we're fully hidden or fully awake to avoid
+    public void notifyDarkAnimationStart(boolean dark) {
+        // We only swap the scaling factor if we're fully dark or fully awake to avoid
         // interpolation issues when playing with the power button.
-        if (mInterpolatedHideAmount == 0 || mInterpolatedHideAmount == 1) {
-            mBackgroundXFactor = hide ? 1.8f : 1.5f;
-            mHideXInterpolator = hide
+        if (mInterpolatedDarkAmount == 0 || mInterpolatedDarkAmount == 1) {
+            mBackgroundXFactor = dark ? 1.8f : 1.5f;
+            mDarkXInterpolator = dark
                     ? Interpolators.FAST_OUT_SLOW_IN_REVERSE
                     : Interpolators.FAST_OUT_SLOW_IN;
+        }
+    }
+
+    @ShadeViewRefactor(RefactorComponent.STATE_RESOLVER)
+    private int findDarkAnimationOriginIndex(@Nullable PointF screenLocation) {
+        if (screenLocation == null || screenLocation.y < mTopPadding) {
+            return AnimationEvent.DARK_ANIMATION_ORIGIN_INDEX_ABOVE;
+        }
+        if (screenLocation.y > getBottomMostNotificationBottom()) {
+            return AnimationEvent.DARK_ANIMATION_ORIGIN_INDEX_BELOW;
+        }
+        View child = getClosestChildAtRawPosition(screenLocation.x, screenLocation.y);
+        if (child != null) {
+            return getNotGoneIndex(child);
+        } else {
+            return AnimationEvent.DARK_ANIMATION_ORIGIN_INDEX_ABOVE;
         }
     }
 
@@ -5111,6 +5118,13 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         mAnimationFinishedRunnables.add(runnable);
     }
 
+    @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
+    public void setHeadsUpManager(HeadsUpManagerPhone headsUpManager) {
+        mHeadsUpManager = headsUpManager;
+        mHeadsUpManager.addListener(mRoundnessManager);
+        mHeadsUpManager.setAnimationStateHandler(this::setHeadsUpGoingAwayAnimationsAllowed);
+    }
+
     public void generateHeadsUpAnimation(NotificationEntry entry, boolean isHeadsUp) {
         ExpandableNotificationRow row = entry.getHeadsUpAnimationView();
         generateHeadsUpAnimation(row, isHeadsUp);
@@ -5121,7 +5135,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         if (mAnimationsEnabled && (isHeadsUp || mHeadsUpGoingAwayAnimationsAllowed)) {
             mHeadsUpChangeAnimations.add(new Pair<>(row, isHeadsUp));
             mNeedsAnimation = true;
-            if (!mIsExpanded && !mWillExpand && !isHeadsUp) {
+            if (!mIsExpanded && !isHeadsUp) {
                 row.setHeadsUpAnimatingAway(true);
             }
             requestChildrenUpdate();
@@ -5140,11 +5154,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         mAmbientState.setMaxHeadsUpTranslation(height - bottomBarHeight);
         mStateAnimator.setHeadsUpAppearHeightBottom(height);
         requestChildrenUpdate();
-    }
-
-    @Override
-    public void setWillExpand(boolean willExpand) {
-        mWillExpand = willExpand;
     }
 
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
@@ -5343,7 +5352,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         boolean publicMode = mLockscreenUserManager.isAnyProfilePublicMode();
 
         if (mHeadsUpAppearanceController != null) {
-            mHeadsUpAppearanceController.onStateChanged();
+            mHeadsUpAppearanceController.setPublicMode(publicMode);
         }
 
         SysuiStatusBarStateController state = (SysuiStatusBarStateController)
@@ -5361,7 +5370,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         onUpdateRowStates();
 
         mEntryManager.updateNotifications();
-        updateVisibility();
     }
 
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
@@ -5397,6 +5405,12 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
     public void setHeadsUpGoingAwayAnimationsAllowed(boolean headsUpGoingAwayAnimationsAllowed) {
         mHeadsUpGoingAwayAnimationsAllowed = headsUpGoingAwayAnimationsAllowed;
+    }
+
+    @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
+    public void setAntiBurnInOffsetX(int antiBurnInOffsetX) {
+        mAntiBurnInOffsetX = antiBurnInOffsetX;
+        updatePanelTranslation();
     }
 
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
@@ -5452,18 +5466,18 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     }
 
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
-    public boolean isFullyHidden() {
-        return mAmbientState.isFullyHidden();
+    public boolean isFullyDark() {
+        return mAmbientState.isFullyDark();
     }
 
     /**
-     * Add a listener whenever the expanded height changes. The first value passed as an
-     * argument is the expanded height and the second one is the appearFraction.
+     * Add a listener whenever the expanded height changes. The first value passed as an argument
+     * is the expanded height and the second one is the appearFraction.
      *
      * @param listener the listener to notify.
      */
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
-    public void addOnExpandedHeightChangedListener(BiConsumer<Float, Float> listener) {
+    public void addOnExpandedHeightListener(BiConsumer<Float, Float> listener) {
         mExpandedHeightListeners.add(listener);
     }
 
@@ -5471,7 +5485,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
      * Stop a listener from listening to the expandedHeight.
      */
     @ShadeViewRefactor(RefactorComponent.SHADE_VIEW)
-    public void removeOnExpandedHeightChangedListener(BiConsumer<Float, Float> listener) {
+    public void removeOnExpandedHeightListener(BiConsumer<Float, Float> listener) {
         mExpandedHeightListeners.remove(listener);
     }
 
@@ -5698,19 +5712,12 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
      */
     public float setPulseHeight(float height) {
         mAmbientState.setPulseHeight(height);
-        if (mKeyguardBypassController.getBypassEnabled()) {
-            notifyAppearChangedListeners();
-        }
         requestChildrenUpdate();
         return Math.max(0, height - mAmbientState.getInnerHeight(true /* ignorePulseHeight */));
     }
 
-    public float getPulseHeight() {
-        return mAmbientState.getPulseHeight();
-    }
-
     /**
-     * Set the amount how much we're dozing. This is different from how hidden the shade is, when
+     * Set the amount how much we're dozing. This is different from how dark the shade is, when
      * the notification is pulsing.
      */
     public void setDozeAmount(float dozeAmount) {
@@ -5720,7 +5727,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
     }
 
     public void wakeUpFromPulse() {
-        setPulseHeight(getWakeUpHeight());
+        setPulseHeight(getPulseHeight());
         // Let's place the hidden views at the end of the pulsing notification to make sure we have
         // a smooth animation
         boolean firstVisibleView = true;
@@ -5754,25 +5761,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
             // The bottom might change because we're using the final actual height of the view
             mAnimateBottomOnLayout = true;
         }
-        // Let's update the footer once the notifications have been updated (in the next frame)
-        post(() -> {
-            updateFooter();
-            updateSectionBoundaries();
-        });
-    }
-
-    public void setOnPulseHeightChangedListener(Runnable listener) {
-        mAmbientState.setOnPulseHeightChangedListener(listener);
-    }
-
-    public float calculateAppearFractionBypass() {
-        float pulseHeight = getPulseHeight();
-        float wakeUpHeight = getWakeUpHeight();
-        float dragDownAmount = pulseHeight - wakeUpHeight;
-
-        // The total distance required to fully reveal the header
-        float totalDistance = getIntrinsicPadding();
-        return MathUtils.smoothStep(0, totalDistance, dragDownAmount);
     }
 
     /**
@@ -5948,6 +5936,9 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
                         .animateY()
                         .animateZ(),
 
+                // ANIMATION_TYPE_DARK
+                null, // Unused
+
                 // ANIMATION_TYPE_GO_TO_FULL_SHADE
                 new AnimationFilter()
                         .animateHeight()
@@ -6009,6 +6000,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
                 // ANIMATION_TYPE_EVERYTHING
                 new AnimationFilter()
                         .animateAlpha()
+                        .animateDark()
                         .animateDimmed()
                         .animateHideSensitive()
                         .animateHeight()
@@ -6039,6 +6031,9 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
 
                 // ANIMATION_TYPE_CHANGE_POSITION
                 StackStateAnimator.ANIMATION_DURATION_STANDARD,
+
+                // ANIMATION_TYPE_DARK
+                StackStateAnimator.ANIMATION_DURATION_WAKEUP,
 
                 // ANIMATION_TYPE_GO_TO_FULL_SHADE
                 StackStateAnimator.ANIMATION_DURATION_GO_TO_FULL_SHADE,
@@ -6075,15 +6070,19 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         static final int ANIMATION_TYPE_ACTIVATED_CHILD = 4;
         static final int ANIMATION_TYPE_DIMMED = 5;
         static final int ANIMATION_TYPE_CHANGE_POSITION = 6;
-        static final int ANIMATION_TYPE_GO_TO_FULL_SHADE = 7;
-        static final int ANIMATION_TYPE_HIDE_SENSITIVE = 8;
-        static final int ANIMATION_TYPE_VIEW_RESIZE = 9;
-        static final int ANIMATION_TYPE_GROUP_EXPANSION_CHANGED = 10;
-        static final int ANIMATION_TYPE_HEADS_UP_APPEAR = 11;
-        static final int ANIMATION_TYPE_HEADS_UP_DISAPPEAR = 12;
-        static final int ANIMATION_TYPE_HEADS_UP_DISAPPEAR_CLICK = 13;
-        static final int ANIMATION_TYPE_HEADS_UP_OTHER = 14;
-        static final int ANIMATION_TYPE_EVERYTHING = 15;
+        static final int ANIMATION_TYPE_DARK = 7;
+        static final int ANIMATION_TYPE_GO_TO_FULL_SHADE = 8;
+        static final int ANIMATION_TYPE_HIDE_SENSITIVE = 9;
+        static final int ANIMATION_TYPE_VIEW_RESIZE = 10;
+        static final int ANIMATION_TYPE_GROUP_EXPANSION_CHANGED = 11;
+        static final int ANIMATION_TYPE_HEADS_UP_APPEAR = 12;
+        static final int ANIMATION_TYPE_HEADS_UP_DISAPPEAR = 13;
+        static final int ANIMATION_TYPE_HEADS_UP_DISAPPEAR_CLICK = 14;
+        static final int ANIMATION_TYPE_HEADS_UP_OTHER = 15;
+        static final int ANIMATION_TYPE_EVERYTHING = 16;
+
+        static final int DARK_ANIMATION_ORIGIN_INDEX_ABOVE = -1;
+        static final int DARK_ANIMATION_ORIGIN_INDEX_BELOW = -2;
 
         final long eventStartTime;
         final ExpandableView mChangingView;
@@ -6091,6 +6090,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         final AnimationFilter filter;
         final long length;
         View viewAfterChangingView;
+        int darkAnimationOriginIndex;
         boolean headsUpFromBottom;
 
         AnimationEvent(ExpandableView view, int type) {
@@ -6345,15 +6345,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
             mAmbientState.onDragFinished(animView);
             updateContinuousShadowDrawing();
             updateContinuousBackgroundDrawing();
-            if (animView instanceof ExpandableNotificationRow) {
-                ExpandableNotificationRow row = (ExpandableNotificationRow) animView;
-                if (row.isPinned() && !canChildBeDismissed(row)
-                        && row.getStatusBarNotification().getNotification().fullScreenIntent
-                                == null) {
-                    mHeadsUpManager.removeNotification(row.getStatusBarNotification().getKey(),
-                            true /* removeImmediately */);
-                }
-            }
         }
 
         @Override
@@ -6404,7 +6395,7 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
                         (int) (dragLengthY / mDisplayMetrics.density),
                         0 /* velocityDp - N/A */);
 
-                if (!mAmbientState.isDozing() || startingChild != null) {
+                if (!mAmbientState.isDark() || startingChild != null) {
                     // We have notifications, go to locked shade.
                     mShadeController.goToLockedShade(startingChild);
                     if (startingChild instanceof ExpandableNotificationRow) {
@@ -6413,11 +6404,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
                     }
                 }
 
-                return true;
-            } else if (mDynamicPrivacyController.isInLockedDownShade()) {
-                mStatusbarStateController.setLeaveOpenOnKeyguardHide(true);
-                mStatusBar.dismissKeyguardThenExecute(() -> false /* dismissAction */,
-                        null /* cancelRunnable */, false /* afterKeyguardGone */);
                 return true;
             } else {
                 // abort gesture.
@@ -6451,30 +6437,6 @@ public class NotificationStackScrollLayout extends ViewGroup implements ScrollAd
         @Override
         public boolean isFalsingCheckNeeded() {
             return mStatusBarState == StatusBarState.KEYGUARD;
-        }
-
-        @Override
-        public boolean isDragDownEnabledForView(ExpandableView view) {
-            if (isDragDownAnywhereEnabled()) {
-                return true;
-            }
-            if (mDynamicPrivacyController.isInLockedDownShade()) {
-                if (view == null) {
-                    // Dragging down is allowed in general
-                    return true;
-                }
-                if (view instanceof ExpandableNotificationRow) {
-                    // Only drag down on sensitive views, otherwise the ExpandHelper will take this
-                    return ((ExpandableNotificationRow) view).getEntry().isSensitive();
-                }
-            }
-            return false;
-        }
-
-        @Override
-        public boolean isDragDownAnywhereEnabled() {
-            return mStatusbarStateController.getState() == StatusBarState.KEYGUARD
-                    && !mKeyguardBypassController.getBypassEnabled();
         }
     };
 
