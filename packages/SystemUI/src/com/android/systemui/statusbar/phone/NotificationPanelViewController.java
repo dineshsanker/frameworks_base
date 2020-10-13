@@ -3433,10 +3433,12 @@ public class NotificationPanelViewController extends PanelViewController {
             } else {
                 if (mKeyguardBottomArea.isLeftVoiceAssist()) {
                     mStatusBar.onVoiceAssistHintStarted();
-                } else {
+                } else if (mKeyguardBottomArea.getLeftIntent() == KeyguardBottomAreaView.PHONE_INTENT) {
                     mStatusBar.onPhoneHintStarted();
-                }
+                } else {
+                mStatusBar.onCustomHintStarted();
             }
+          }
         }
 
         @Override
