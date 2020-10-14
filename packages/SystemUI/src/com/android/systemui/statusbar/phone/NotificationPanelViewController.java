@@ -135,6 +135,8 @@ import javax.inject.Inject;
 public class NotificationPanelViewController extends PanelViewController {
 
     private static final boolean DEBUG = false;
+    
+    private Context mContext;
 
     /**
      * Fling expanding QS.
@@ -619,7 +621,7 @@ public class NotificationPanelViewController extends PanelViewController {
         mKeyguardBottomArea = mView.findViewById(R.id.keyguard_bottom_area);
         mQsNavbarScrim = mView.findViewById(R.id.qs_navbar_scrim);
         mLastOrientation = mResources.getConfiguration().orientation;
-        mPulseLightsView = (NotificationLightsView) findViewById(R.id.lights_container);
+        mPulseLightsView = (NotificationLightsView) mView.findViewById(R.id.lights_container);
 
         initBottomArea();
 
