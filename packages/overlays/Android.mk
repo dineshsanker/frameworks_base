@@ -17,24 +17,11 @@ include $(CLEAR_VARS)
 
 LOCAL_MODULE := frameworks-base-overlays
 LOCAL_REQUIRED_MODULES := \
-	AccentColorDarkOrangeOverlay \
-	AccentColorMIUIOverlay \
-        AccentColorXiaomiOrangeOverlay \
-	AccentColorTealOverlay \
-	AccentColorRedOverlay \
-	AccentColorQGreenOverlay \
-	AccentColorPinkOverlay \
-	AccentColorLightPurpleOverlay \
-	AccentColorIndigoOverlay \
-	AccentColorFlatPinkOverlay \
-	AccentColorCyanOverlay \
-	AccentColorBlueGrayOverlay \
-	AccentColorPaletteOverlay \
-	AccentColorCarbonOverlay \
-	AccentColorSandOverlay \
-	AccentColorAmethystOverlay \
-	AccentColorAquamarineOverlay \
-	AccentColorTangerineOverlay \
+	DisplayCutoutEmulationCornerOverlay \
+	DisplayCutoutEmulationDoubleOverlay \
+        DisplayCutoutEmulationHoleOverlay \
+	DisplayCutoutEmulationTallOverlay \
+	DisplayCutoutEmulationWaterfallOverlay \
 	FontNotoSerifSourceOverlay \
 	IconPackCircularAndroidOverlay \
 	IconPackCircularLauncherOverlay \
